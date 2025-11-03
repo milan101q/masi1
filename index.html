@@ -13,6 +13,16 @@
       body {
         font-family: 'Vazirmatn', 'Roboto', sans-serif;
       }
+      .animate-fade-in {
+        animation: fadeIn 0.5s ease-in-out;
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      .text-shadow-lg {
+        text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+      }
     </style>
   <script type="importmap">
 {
@@ -30,13 +40,1323 @@
 </head>
   <body class="bg-green-50 text-gray-800">
     <div id="root"></div>
-    <!-- Update script type to 'text/babel' and point to the .tsx source file -->
-    <script type="text/babel" data-type="module" src="index.tsx"></script>
+
+    <!-- 
+      Configuration for API Key 
+      For deployment on static hosts like GitHub Pages, where process.env is not available,
+      you MUST set your API key here.
+    -->
+    <script>
+      window.process = { 
+        env: { 
+          API_KEY: "PASTE_YOUR_GEMINI_API_KEY_HERE" 
+        } 
+      };
+    </script>
+
+    <!-- Main Application Script -->
+    <script type="text/babel" data-type="module">
+// All imports are consolidated here
+import React, { useState, useEffect, useRef, createContext, useContext, ReactNode, useCallback, useMemo } from 'react';
+import ReactDOM from 'react-dom/client';
+import { GoogleGenAI } from "@google/genai";
+import type { Chat } from '@google/genai';
+import ReactMarkdown from 'react-markdown';
+
+// --- Consolidated from types.ts ---
+interface SavedPlant {
+  id: string;
+  name: string;
+  details: string; // The full markdown text from Gemini
+  savedAt: Date;
+  image: string; // The base64 data URL of the user's uploaded image
+  completedTasks?: { [taskTitle: string]: boolean };
+}
+
+interface Message {
+  id:string;
+  text: string;
+  sender: 'user' | 'bot';
+  timestamp: Date;
+}
+
+interface CommonPlant {
+    name: string;
+    image: string;
+}
+
+type AppView = 'identification' | 'result' | 'chat' | 'my_plants' | 'common_plants' | 'plant_detail';
+
+interface ChatSession {
+    session: Chat;
+    plantContext: string;
+}
+
+// --- Consolidated from i18n.tsx ---
+const translations = {
+  en: {
+    plantIdentifier: 'Plant Identifier',
+    identifyPlant: 'Identify My Plant',
+    myPlants: 'My Plants',
+    chat: 'Chat',
+    uploadFromGallery: 'Upload from Gallery',
+    takePicture: 'Take a Picture',
+    identifying: 'Identifying...',
+    chatWithBot: 'Chat About This Plant',
+    savePlant: 'Save Plant',
+    saved: 'Saved',
+    deletePlant: 'Delete Plant',
+    confirmDelete: 'Are you sure you want to delete this plant?',
+    cancel: 'Cancel',
+    delete: 'Delete',
+    plantDetails: 'Plant Details',
+    startNewId: 'Start New Identification',
+    typeMessage: 'Type your message...',
+    viewDetails: 'View Details',
+    errorIdentifying: 'An error occurred while identifying the plant. Please try again.',
+    errorNoApiKey: 'API Key not configured. Please set up your Gemini API key in index.html.',
+    errorGeneral: 'An unexpected error occurred. Please try again later.',
+    errorCamera: 'Could not access the camera. Please check permissions.',
+    errorMicrophone: 'Microphone access was denied. Please allow microphone access in your browser settings.',
+    savedPlantsTitle: "My Saved Plants",
+    noSavedPlants: "You haven't saved any plants yet.",
+    backToId: "Back to Identification",
+    capture: 'Capture',
+    retake: 'Retake',
+    usePhoto: 'Use Photo',
+    back: 'Back',
+    name: 'Plant Name',
+    intro: 'Introduction',
+    care: 'Care Instructions',
+    problems: 'Common Problems',
+    light: 'Light',
+    watering: 'Watering',
+    soil: 'Soil',
+    temp: 'Temperature & Humidity',
+    fertilizing: 'Fertilizing',
+    botWelcome: "I'm ready to help you with your plant. What would you like to know?",
+    startRecording: 'Start Voice Input',
+    stopRecording: 'Stop Voice Input',
+    cameraTip1: 'Center a clear leaf or flower in the frame.',
+    cameraTip2: 'Ensure the image is sharp and in focus.',
+    cameraTip3: 'Use good, even lighting.',
+    cameraTip4: 'Avoid busy or cluttered backgrounds.',
+    offlineMessage: 'You are currently offline. Functionality is limited.',
+    offlineIdentificationDisabled: 'Plant identification is unavailable while offline. You can still view your saved plants.',
+    offlineChatDisabled: 'Chat is disabled while offline.',
+    careProgress: 'Care Progress',
+    tasksCompleted: '{count} of {total} tasks completed',
+    backToMyPlants: 'Back to My Plants',
+  },
+  fa: {
+    plantIdentifier: 'شناسایی گیاه',
+    identifyPlant: 'گیاه من را شناسایی کن',
+    myPlants: 'گیاهان من',
+    chat: 'چت',
+    uploadFromGallery: 'آپلود از گالری',
+    takePicture: 'گرفتن عکس',
+    identifying: 'در حال شناسایی...',
+    chatWithBot: 'درباره این گیاه چت کنید',
+    savePlant: 'ذخیره گیاه',
+    saved: 'ذخیره شد',
+    deletePlant: 'حذف گیاه',
+    confirmDelete: 'آیا از حذف این گیاه مطمئن هستید؟',
+    cancel: 'انصراف',
+    delete: 'حذف',
+    plantDetails: 'جزئیات گیاه',
+    startNewId: 'شروع شناسایی جدید',
+    typeMessage: 'پیام خود را تایپ کنید...',
+    viewDetails: 'مشاهده جزئیات',
+    errorIdentifying: 'خطایی در هنگام شناسایی گیاه رخ داد. لطفاً دوباره امتحان کنید.',
+    errorNoApiKey: 'کلید API پیکربندی نشده است. لطفاً کلید Gemini API خود را در index.html تنظیم کنید.',
+    errorGeneral: 'یک خطای غیرمنتظره رخ داد. لطفاً بعداً دوباره امتحان کنید.',
+    errorCamera: 'دسترسی به دوربین امکان‌پذیر نیست. لطفاً دسترسی‌ها را بررسی کنید.',
+    errorMicrophone: 'دسترسی به میکروفون رد شد. لطفاً دسترسی به میکروفون را در تنظیمات مرورگر خود مجاز کنید.',
+    savedPlantsTitle: "گیاهان ذخیره شده من",
+    noSavedPlants: "شما هنوز هیچ گیاهی را ذخیره نکرده اید.",
+    backToId: "بازگشت به شناسایی",
+    capture: 'گرفتن عکس',
+    retake: 'گرفتن مجدد',
+    usePhoto: 'استفاده از عکس',
+    back: 'بازگشت',
+    name: 'نام گیاه',
+    intro: 'معرفی',
+    care: 'دستورالعمل‌های مراقبت',
+    problems: 'مشکلات رایج',
+    light: 'نور',
+    watering: 'آبیاری',
+    soil: 'خاک',
+    temp: 'دما و رطوبت',
+    fertilizing: 'کوددهی',
+    botWelcome: "من آماده ام تا در مورد گیاهتان به شما کمک کنم. مایلید چه چیزی بدانید؟",
+    startRecording: 'شروع ورودی صوتی',
+    stopRecording: 'توقف ورودی صوتی',
+    cameraTip1: 'یک برگ یا گل واضح را در کادر وسط قرار دهید.',
+    cameraTip2: 'اطمینان حاصل کنید که تصویر واضح و در فوکوس باشد.',
+    cameraTip3: 'از نور خوب و یکنواخت استفاده کنید.',
+    cameraTip4: 'از پس‌زمینه‌های شلوغ و درهم پرهیز کنید.',
+    offlineMessage: 'شما در حال حاضر آفلاین هستید. عملکرد برنامه محدود است.',
+    offlineIdentificationDisabled: 'شناسایی گیاه در حالت آفلاین در دسترس نیست. همچنان می‌توانید گیاهان ذخیره شده خود را مشاهده کنید.',
+    offlineChatDisabled: 'چت در حالت آفلاین غیرفعال است.',
+    careProgress: 'روند مراقبت',
+    tasksCompleted: '{count} از {total} وظیفه انجام شده است',
+    backToMyPlants: 'بازگشت به گیاهان من',
+  }
+};
+
+type Language = 'en' | 'fa';
+type TranslationKeys = keyof typeof translations.en;
+
+interface LanguageContextType {
+  language: Language;
+  setLanguage: (language: Language) => void;
+  t: (key: TranslationKeys, vars?: Record<string, string | number>) => string;
+  direction: 'ltr' | 'rtl';
+}
+
+const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
+
+const LanguageProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [language, setLanguage] = useState<Language>('en');
+
+  const t = useCallback((key: TranslationKeys, vars: Record<string, string | number> = {}): string => {
+    let translation = translations[language][key] || translations.en[key];
+    Object.keys(vars).forEach(varKey => {
+        const regex = new RegExp(`{${varKey}}`, 'g');
+        translation = translation.replace(regex, String(vars[varKey]));
+    });
+    return translation;
+  }, [language]);
+  
+  const direction = language === 'fa' ? 'rtl' : 'ltr';
+
+  return (
+    <LanguageContext.Provider value={{ language, setLanguage, t, direction }}>
+      {children}
+    </LanguageContext.Provider>
+  );
+};
+
+const useLanguage = () => {
+  const context = useContext(LanguageContext);
+  if (!context) {
+    throw new Error('useLanguage must be used within a LanguageProvider');
+  }
+  return context;
+};
+
+// --- Consolidated from components/icons.tsx ---
+const UploadIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+  </svg>
+);
+
+const SendIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" className={className} viewBox="0 0 20 20" fill="currentColor">
+    <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+  </svg>
+);
+
+const SparklesIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.293 2.293a1 1 0 010 1.414L10 12l-2 2 2.828 2.828a1 1 0 010 1.414L10 21m5-16l2.293 2.293a1 1 0 000 1.414L15 12l-2 2 2.828 2.828a1 1 0 000 1.414L15 21" />
+    </svg>
+);
+
+const CalendarIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+    </svg>
+);
+
+const BellIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+    </svg>
+);
+
+const TrashIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+    </svg>
+);
+
+const MicrophoneIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+    </svg>
+);
+
+const ShareIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12s-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.368a3 3 0 105.367 2.684 3 3 0 00-5.367-2.684z" />
+    </svg>
+);
+
+const CameraIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+);
+
+const SunIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+    </svg>
+);
+
+const WaterDropIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 2.25C8.134 2.25 5 5.384 5 9.25c0 3.25 3 7.5 7 12.25 4-4.75 7-9 7-12.25C19 5.384 15.866 2.25 12 2.25z" />
+    </svg>
+);
+
+const LeafIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+);
+
+const ThermometerIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 14.25V6.75a3 3 0 116 0v7.5a3 3 0 11-6 0z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 19.5V14.25" />
+    </svg>
+);
+
+const PlusCircleIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+);
+
+const BookmarkIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
+    </svg>
+);
+
+const BookOpenIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+    </svg>
+);
+
+
+// --- Consolidated from services/geminiService.ts ---
+// The API key is polyfilled in a script tag in index.html
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+/**
+ * Identifies a plant from an image using the Gemini API.
+ */
+const identifyPlant = async (imageBase64: string, mimeType: string, language: 'en' | 'fa'): Promise<string> => {
+  const langInstruction = language === 'fa' 
+    ? "Provide the response in Persian (Farsi)."
+    : "Provide the response in English.";
+
+  const prompt = `
+    Please identify the plant in this image. Provide a detailed description covering the following sections.
+    Format the output in Markdown. Each section should have a bolded title followed by a colon, like this: **Section Title:**
+
+    1.  **Plant Name:** Use the following sub-headings for the common and scientific names. For Farsi responses, translate the sub-headings too (Common Name -> نام رایج, Scientific Name -> نام علمی).
+        **Common Name:** [Common Name]
+        **Scientific Name:** [Scientific Name]
+    2.  **Introduction:** A brief, engaging introduction to the plant.
+    3.  **Care Instructions:** Detailed care instructions with subsections for:
+        *   **Light:**
+        *   **Watering:**
+        *   **Soil:**
+        *   **Temperature & Humidity:**
+        *   **Fertilizing:**
+    4.  **Common Problems:** A list of common pests or diseases, and how to deal with them.
+    
+    If you cannot identify the plant, please state that clearly.
+  `;
+
+  const imagePart = {
+    inlineData: {
+      data: imageBase64,
+      mimeType: mimeType,
+    },
+  };
+
+  const textPart = {
+      text: prompt
+  };
+
+  try {
+    const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts: [imagePart, textPart] },
+        config: {
+            systemInstruction: langInstruction
+        }
+    });
+    
+    const text = response.text;
+    if (!text) {
+        throw new Error("Received an empty response from the API.");
+    }
+    return text;
+  } catch (error) {
+    console.error("Error identifying plant:", error);
+    throw new Error("Failed to identify plant. Please check the console for details.");
+  }
+};
+
+/**
+ * Creates a new chat session with the Gemini API.
+ */
+const createChat = (plantInfo: string, language: 'en' | 'fa'): Chat => {
+  const langInstruction = language === 'fa' 
+    ? "You must respond in Persian (Farsi)."
+    : "You must respond in English.";
+    
+  const botWelcomeMessage = language === 'fa'
+    ? "من آماده ام تا در مورد گیاهتان به شما کمک کنم. مایلید چه چیزی بدانید؟"
+    : "I'm ready to help you with your plant. What would you like to know?";
+
+  const chat = ai.chats.create({
+    model: 'gemini-2.5-flash',
+    history: [
+      {
+        role: "user",
+        parts: [{text: `I have a plant. Here is its information:\n\n${plantInfo}\n\nI want to chat with you about it. Please act as a plant care expert.`}],
+      },
+      {
+        role: "model",
+        parts: [{text: botWelcomeMessage}],
+      },
+    ],
+    config: {
+        systemInstruction: langInstruction
+    }
+  });
+
+  return chat;
+};
+
+
+// --- Consolidated from components/MyPlantsList.tsx ---
+const MyPlantsList: React.FC<MyPlantsListProps> = ({ savedPlants, onViewPlant, onDeletePlant, onBack }) => {
+  const { t } = useLanguage();
+
+  return (
+    <div className="w-full max-w-4xl mx-auto p-4 animate-fade-in">
+      <h1 className="text-3xl sm:text-4xl font-bold text-gray-800 dark:text-gray-100 text-center mb-8">{t('savedPlantsTitle')}</h1>
+      
+      {savedPlants.length === 0 ? (
+        <div className="text-center text-gray-500 dark:text-gray-400 mt-8">
+          <p className="text-lg">{t('noSavedPlants')}</p>
+        </div>
+      ) : (
+        <ul className="space-y-4">
+          {savedPlants.sort((a,b) => new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime()).map((plant) => (
+            <li key={plant.id} className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 flex items-center justify-between transition-transform transform hover:scale-105">
+              <div className="flex items-center gap-4">
+                {plant.image ? (
+                    <img src={plant.image} alt={plant.name} className="w-16 h-16 object-cover rounded-md" />
+                ) : (
+                    <div className="w-16 h-16 bg-gray-100 dark:bg-gray-700 rounded-md flex items-center justify-center">
+                        <LeafIcon className="w-8 h-8 text-gray-400" />
+                    </div>
+                )}
+                <span className="text-lg font-medium text-gray-700 dark:text-gray-200">{plant.name}</span>
+              </div>
+
+              <div className="flex items-center space-x-2 rtl:space-x-reverse">
+                <button
+                  onClick={() => onViewPlant(plant)}
+                  className="p-2 text-blue-500 hover:text-blue-700 dark:hover:text-blue-300 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                  aria-label={t('viewDetails')}
+                >
+                  <BookOpenIcon className="w-6 h-6" />
+                </button>
+                <button
+                  onClick={() => onDeletePlant(plant.id)}
+                  className="p-2 text-red-500 hover:text-red-700 dark:hover:text-red-300 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                  aria-label={t('deletePlant')}
+                >
+                  <TrashIcon className="w-6 h-6" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="text-center mt-8">
+        <button
+          onClick={onBack}
+          className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-full transition"
+        >
+          {t('backToId')}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+
+// --- Consolidated from components/PlantIdResult.tsx ---
+interface PlantIdResultProps {
+  text: string;
+  image: string | null;
+  isOnline: boolean;
+  onStartChat: () => void;
+  isSavedView?: boolean;
+  onSavePlant?: (plantName: string, plantDetails: string, image: string) => void;
+  savedPlants?: SavedPlant[];
+  plant?: SavedPlant;
+  onToggleTask?: (taskTitle: string) => void;
+  onBackToPlants?: () => void;
+}
+
+interface ParsedInfo {
+  commonName?: string;
+  scientificName?: string;
+  introduction?: string;
+  careInstructions?: { title: string; description: string }[];
+  commonProblems?: string;
+  [key: string]: any;
+}
+
+const isHeader = (header: string, enHeader: string, faHeader: string): boolean => {
+  const lowerHeader = header.trim().toLowerCase();
+  return lowerHeader === enHeader.trim().toLowerCase() || lowerHeader === faHeader.trim().toLowerCase();
+};
+
+const PlantIdResult: React.FC<PlantIdResultProps> = ({ 
+  text, 
+  onStartChat, 
+  onSavePlant, 
+  savedPlants, 
+  isOnline, 
+  image,
+  isSavedView = false,
+  plant,
+  onToggleTask,
+  onBackToPlants
+}) => {
+  const { t } = useLanguage();
+
+  const parsedInfo: ParsedInfo = useMemo(() => {
+    const info: ParsedInfo = {};
+    
+    const headers = {
+      en: { name: 'Plant Name', intro: 'Introduction', care: 'Care Instructions', problems: 'Common Problems' },
+      fa: { name: 'نام گیاه', intro: 'معرفی', care: 'دستورالعمل‌های مراقبت', problems: 'مشکلات رایج' }
+    };
+    
+    const parts = text.split(/\n\s*(?=\*\*)/).filter(p => p.trim());
+
+    parts.forEach(part => {
+      const match = part.match(/^\*\*(.*?):\*\*\s*([\s\S]*)/);
+      if (match) {
+        const key = match[1].trim();
+        const value = match[2].trim();
+        
+        if (isHeader(key, headers.en.name, headers.fa.name)) {
+          const commonNameMatch = value.match(/\*\*\s*(?:Common Name|نام رایج)\s*:\*\*\s*(.*)/i);
+          const scientificNameMatch = value.match(/\*\*\s*(?:Scientific Name|نام علمی)\s*:\*\*\s*(.*)/i);
+          
+          info.commonName = commonNameMatch ? commonNameMatch[1].trim().replace(/\*$/, '').trim() : value.split('\n')[0].trim();
+          info.scientificName = scientificNameMatch ? scientificNameMatch[1].trim().replace(/\*$/, '').trim() : '';
+
+        }
+        else if (isHeader(key, headers.en.intro, headers.fa.intro)) info.introduction = value;
+        else if (isHeader(key, headers.en.problems, headers.fa.problems)) info.commonProblems = value;
+        else if (isHeader(key, headers.en.care, headers.fa.care)) {
+            const careItems = value.split(/\n\s*(?=\*)/).map(item => item.trim()).filter(Boolean);
+            info.careInstructions = careItems.map(item => {
+                const cleanItem = item.replace(/^\*/, '').trim();
+                const instructionMatch = cleanItem.match(/^\*\*(.*?):\*\*\s*([\s\S]*)/);
+                if (instructionMatch) {
+                    return { title: instructionMatch[1].trim(), description: instructionMatch[2].trim() };
+                }
+                return null;
+            }).filter((item): item is { title: string; description: string } => item !== null);
+        }
+      }
+    });
+
+    return info;
+  }, [text]);
+
+  const getCareIcon = (title: string) => {
+    const careHeaders = {
+        en: { light: 'Light', watering: 'Watering', soil: 'Soil', temp: 'Temperature & Humidity', fertilizing: 'Fertilizing' },
+        fa: { light: 'نور', watering: 'آبیاری', soil: 'خاک', temp: 'دما و رطوبت', fertilizing: 'کوددهی' }
+    };
+    const classNames = "w-8 h-8 text-green-500";
+    if (isHeader(title, careHeaders.en.light, careHeaders.fa.light)) return <SunIcon className={classNames} />;
+    if (isHeader(title, careHeaders.en.watering, careHeaders.fa.watering)) return <WaterDropIcon className={classNames} />;
+    if (isHeader(title, careHeaders.en.soil, careHeaders.fa.soil)) return <LeafIcon className={classNames} />;
+    if (isHeader(title, careHeaders.en.temp, careHeaders.fa.temp)) return <ThermometerIcon className={classNames} />;
+    if (isHeader(title, careHeaders.en.fertilizing, careHeaders.fa.fertilizing)) return <PlusCircleIcon className={classNames} />;
+    return null;
+  };
+  
+  const isSaved = useMemo(() => {
+    if (!savedPlants) return false;
+    return savedPlants.some(p => p.details === text);
+  }, [savedPlants, text]);
+
+  const totalTasks = parsedInfo.careInstructions?.length || 0;
+  const completedTasksCount = totalTasks > 0 ? Object.values(plant?.completedTasks || {}).filter(Boolean).length : 0;
+  const progressPercentage = totalTasks > 0 ? (completedTasksCount / totalTasks) * 100 : 0;
+
+
+  return (
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 sm:p-8 w-full max-w-4xl animate-fade-in">
+      {parsedInfo.commonName && (
+        <div className="text-center mb-6">
+            <h1 className="text-3xl sm:text-4xl font-bold text-gray-800 dark:text-gray-100">
+                {parsedInfo.commonName}
+            </h1>
+            {parsedInfo.scientificName && (
+                <p className="text-lg text-gray-500 dark:text-gray-400 italic mt-1">
+                    {parsedInfo.scientificName}
+                </p>
+            )}
+        </div>
+      )}
+      
+      {parsedInfo.introduction && (
+        <div className="prose dark:prose-invert max-w-none text-lg text-gray-600 dark:text-gray-300 mb-8 text-center">
+            <ReactMarkdown>{parsedInfo.introduction}</ReactMarkdown>
+        </div>
+      )}
+
+      {isSavedView && plant && parsedInfo.careInstructions && totalTasks > 0 && (
+          <div className="mb-8 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+              <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-3">{t('careProgress')}</h2>
+              <div className="w-full bg-gray-200 dark:bg-gray-600 rounded-full h-4 mb-2">
+                  <div className="bg-green-500 h-4 rounded-full transition-all duration-500" style={{ width: `${progressPercentage}%` }}></div>
+              </div>
+              <p className="text-sm text-gray-600 dark:text-gray-300 text-right mb-4">
+                  {t('tasksCompleted', { count: completedTasksCount, total: totalTasks })}
+              </p>
+              <ul className="space-y-2">
+                  {parsedInfo.careInstructions.map((item, index) => {
+                      const isCompleted = plant?.completedTasks?.[item.title] || false;
+                      return (
+                          <li key={index} onClick={() => onToggleTask?.(item.title)} className="flex items-center p-3 rounded-lg cursor-pointer bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-900 shadow-sm transition">
+                              <div className="flex-shrink-0">
+                                  {isCompleted ? <LeafIcon className="w-6 h-6 text-green-500" /> : <div className="w-6 h-6 border-2 border-gray-300 dark:border-gray-500 rounded-full"></div>}
+                              </div>
+                              <span className={`mx-3 text-gray-700 dark:text-gray-200 ${isCompleted ? 'line-through text-gray-400 dark:text-gray-500' : ''}`}>{item.title}</span>
+                          </li>
+                      );
+                  })}
+              </ul>
+          </div>
+      )}
+
+      {parsedInfo.careInstructions && parsedInfo.careInstructions.length > 0 && (
+          <div className="mb-8">
+              <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">{t('care')}</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {parsedInfo.careInstructions.map((item, index) => (
+                      <div key={index} className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg flex items-start space-x-4 rtl:space-x-reverse">
+                          <div className="flex-shrink-0">{getCareIcon(item.title)}</div>
+                          <div>
+                              <h3 className="font-bold text-gray-800 dark:text-gray-100">{item.title}</h3>
+                              <div className="prose prose-sm dark:prose-invert max-w-none text-gray-600 dark:text-gray-300">
+                                <ReactMarkdown>{item.description}</ReactMarkdown>
+                              </div>
+                          </div>
+                      </div>
+                  ))}
+              </div>
+          </div>
+      )}
+
+      {parsedInfo.commonProblems && (
+         <div className="mb-8">
+            <h2 className="text-2xl font-semibold text-gray-700 dark:text-gray-200 mb-4">{t('problems')}</h2>
+            <div className="prose dark:prose-invert max-w-none text-gray-600 dark:text-gray-300">
+                <ReactMarkdown>{parsedInfo.commonProblems}</ReactMarkdown>
+            </div>
+         </div>
+      )}
+      
+      <div className="text-center mt-8 flex flex-wrap justify-center gap-4">
+        {isSavedView ? (
+           <>
+              <button
+                  onClick={onBackToPlants}
+                  className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-full inline-flex items-center transition-transform transform hover:scale-105"
+              >
+                  {t('backToMyPlants')}
+              </button>
+              <button
+                  onClick={onStartChat}
+                  disabled={!isOnline}
+                  className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-full inline-flex items-center transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                  <SparklesIcon className="w-6 h-6 mr-2" />
+                  {t('chatWithBot')}
+              </button>
+           </>
+        ) : (
+          <>
+            <button
+                onClick={onStartChat}
+                disabled={!isOnline}
+                className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-3 px-6 rounded-full inline-flex items-center transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+                <SparklesIcon className="w-6 h-6 mr-2" />
+                {t('chatWithBot')}
+            </button>
+            <button
+                onClick={() => {
+                    if (parsedInfo.commonName && image && onSavePlant) {
+                        onSavePlant(parsedInfo.commonName, text, image);
+                    }
+                }}
+                disabled={isSaved || !parsedInfo.commonName || !image}
+                className="bg-green-500 hover:bg-green-600 text-white font-bold py-3 px-6 rounded-full inline-flex items-center transition-transform transform hover:scale-105 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+                <BookmarkIcon className="w-6 h-6 mr-2" />
+                {isSaved ? t('saved') : t('savePlant')}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+
+// --- Consolidated from App.tsx ---
+const App: React.FC = () => {
+    const { t, language, setLanguage, direction } = useLanguage();
+    const [view, setView] = useState<AppView>('identification');
+    const [selectedImage, setSelectedImage] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [plantIdResult, setPlantIdResult] = useState<string>('');
+    
+    const [savedPlants, setSavedPlants] = useState<SavedPlant[]>([]);
+    const [viewingPlant, setViewingPlant] = useState<SavedPlant | null>(null);
+    
+    const [chatSession, setChatSession] = useState<Chat | null>(null);
+    const [messages, setMessages] = useState<Message[]>([]);
+    const [chatInput, setChatInput] = useState('');
+    const [isBotTyping, setIsBotTyping] = useState(false);
+    const [isRecording, setIsRecording] = useState(false);
+
+    const [cameraViewActive, setCameraViewActive] = useState(false);
+    const [capturedImage, setCapturedImage] = useState<string | null>(null);
+    const [tipIndex, setTipIndex] = useState(0);
+
+    const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+    const recognitionRef = useRef<any | null>(null);
+    const chatInputBeforeRecording = useRef<string>('');
+    
+    useEffect(() => {
+        const handleOnline = () => setIsOnline(true);
+        const handleOffline = () => setIsOnline(false);
+
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+
+        return () => {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+        };
+    }, []);
+
+    // Load saved plants from local storage on mount
+    useEffect(() => {
+        try {
+            const storedPlants = localStorage.getItem('savedPlants');
+            if (storedPlants) {
+                setSavedPlants(JSON.parse(storedPlants).map((p: any) => ({...p, savedAt: new Date(p.savedAt)})));
+            }
+        } catch (e) {
+            console.error("Failed to load saved plants from local storage", e);
+        }
+    }, []);
+
+    // Save plants to local storage whenever they change
+    useEffect(() => {
+        try {
+            localStorage.setItem('savedPlants', JSON.stringify(savedPlants));
+        } catch (e) {
+            console.error("Failed to save plants to local storage", e);
+        }
+    }, [savedPlants]);
+
+    // Effect to handle camera stream
+    useEffect(() => {
+        if (cameraViewActive) {
+            setCapturedImage(null);
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(stream => {
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        streamRef.current = stream;
+                    }
+                })
+                .catch(err => {
+                    console.error("Error accessing camera: ", err);
+                    setError(t('errorCamera'));
+                    setCameraViewActive(false);
+                });
+        } else {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+                streamRef.current = null;
+            }
+        }
+
+        return () => {
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
+        };
+    }, [cameraViewActive, t]);
+    
+    // Effect to cycle through camera tips
+    useEffect(() => {
+        let tipInterval: number | undefined;
+        if (cameraViewActive && !capturedImage) {
+            const tips = [t('cameraTip1'), t('cameraTip2'), t('cameraTip3'), t('cameraTip4')];
+            tipInterval = window.setInterval(() => {
+                setTipIndex(prevIndex => (prevIndex + 1) % tips.length);
+            }, 4000); // Change tip every 4 seconds
+        }
+
+        return () => {
+            if (tipInterval) {
+                clearInterval(tipInterval);
+            }
+        };
+    }, [cameraViewActive, capturedImage, t]);
+
+
+    // Effect to handle speech recognition setup
+    useEffect(() => {
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            console.warn("Speech Recognition not supported by this browser.");
+            return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event: any) => {
+            let final_transcript = '';
+            let interim_transcript = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    final_transcript += event.results[i][0].transcript;
+                } else {
+                    interim_transcript += event.results[i][0].transcript;
+                }
+            }
+            setChatInput(chatInputBeforeRecording.current + final_transcript + interim_transcript);
+        };
+        
+        recognition.onstart = () => setIsRecording(true);
+        recognition.onend = () => setIsRecording(false);
+        recognition.onerror = (event: any) => {
+            console.error('Speech recognition error:', event.error);
+            setError(`Speech recognition error: ${event.error}`);
+            setIsRecording(false);
+        };
+        
+        recognitionRef.current = recognition;
+
+        return () => {
+            if(recognitionRef.current) {
+               recognitionRef.current.stop();
+            }
+        };
+    }, []);
+
+    const handleIdentify = async (file: File) => {
+        if (!isOnline) {
+            setError(t('offlineMessage'));
+            return;
+        }
+        if (!process.env.API_KEY || process.env.API_KEY === "PASTE_YOUR_GEMINI_API_KEY_HERE") {
+            setError(t('errorNoApiKey'));
+            return;
+        }
+        setIsLoading(true);
+        setError(null);
+        
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+            try {
+                const base64Data = (reader.result as string).split(',')[1];
+                const resultText = await identifyPlant(base64Data, file.type, language);
+                setPlantIdResult(resultText);
+                setView('result');
+            } catch (e: any) {
+                setError(e.message || t('errorIdentifying'));
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const handleImageUpload = (file: File) => {
+        if (file && file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                setSelectedImage(reader.result as string);
+                handleIdentify(file);
+            };
+            reader.readAsDataURL(file);
+        }
+    };
+
+    const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+        if (event.target.files && event.target.files[0]) {
+            handleImageUpload(event.target.files[0]);
+        }
+    };
+
+    const handleStartChat = (plantDetails: string) => {
+        const chat = createChat(plantDetails, language);
+        setChatSession(chat);
+        setMessages([
+            { id: '1', text: t('botWelcome'), sender: 'bot', timestamp: new Date() }
+        ]);
+        setView('chat');
+    };
+
+    const handleSendMessage = async () => {
+        if (!chatInput.trim() || !chatSession || isBotTyping || !isOnline) return;
+        
+        const userMessage: Message = { id: Date.now().toString(), text: chatInput, sender: 'user', timestamp: new Date() };
+        setMessages(prev => [...prev, userMessage]);
+        const currentChatInput = chatInput;
+        setChatInput('');
+        setIsBotTyping(true);
+        setError(null);
+
+        try {
+            const responseStream = await chatSession.sendMessageStream({ message: currentChatInput });
+            let botResponseText = '';
+            for await (const chunk of responseStream) {
+                botResponseText += chunk.text;
+            }
+            const botMessage: Message = { id: (Date.now() + 1).toString(), text: botResponseText, sender: 'bot', timestamp: new Date() };
+            setMessages(prev => [...prev, botMessage]);
+        } catch (e) {
+            setError(t('errorGeneral'));
+        } finally {
+            setIsBotTyping(false);
+        }
+    };
+
+    const handleToggleRecording = () => {
+        const recognition = recognitionRef.current;
+        if (!recognition || !isOnline) return;
+
+        if (isRecording) {
+            recognition.stop();
+        } else {
+             navigator.mediaDevices.getUserMedia({ audio: true }).then(() => {
+                if (recognitionRef.current) {
+                    chatInputBeforeRecording.current = chatInput;
+                    recognitionRef.current.lang = language === 'fa' ? 'fa-IR' : 'en-US';
+                    recognitionRef.current.start();
+                }
+            }).catch(err => {
+                console.error("Microphone access denied:", err);
+                setError(t('errorMicrophone'));
+            });
+        }
+    };
+    
+    const handleSavePlant = (plantName: string, plantDetails: string, image: string) => {
+        const newPlant: SavedPlant = {
+            id: Date.now().toString(),
+            name: plantName,
+            details: plantDetails,
+            savedAt: new Date(),
+            image: image,
+            completedTasks: {},
+        };
+        setSavedPlants(prev => [...prev, newPlant]);
+    };
+
+    const handleDeletePlant = (plantId: string) => {
+        if (window.confirm(t('confirmDelete'))) {
+            setSavedPlants(prev => prev.filter(p => p.id !== plantId));
+            if (viewingPlant?.id === plantId) {
+                setViewingPlant(null);
+                setView('my_plants');
+            }
+        }
+    };
+
+    const handleViewSavedPlant = (plant: SavedPlant) => {
+        setViewingPlant(plant);
+        setView('result');
+    };
+    
+    const handleToggleCareTask = (plantId: string, taskTitle: string) => {
+        setSavedPlants(prevPlants => {
+            const newPlants = prevPlants.map(p => {
+                if (p.id === plantId) {
+                    const updatedTasks = { ...(p.completedTasks || {}) };
+                    updatedTasks[taskTitle] = !updatedTasks[taskTitle];
+                    const updatedPlant = { ...p, completedTasks: updatedTasks };
+                    // also update viewing plant if it's the one being changed
+                    if(viewingPlant?.id === plantId) {
+                        setViewingPlant(updatedPlant);
+                    }
+                    return updatedPlant;
+                }
+                return p;
+            });
+            return newPlants;
+        });
+    };
+
+    const handleOpenCamera = () => setCameraViewActive(true);
+    const handleCloseCamera = () => {
+        setCameraViewActive(false);
+        setCapturedImage(null);
+    };
+
+    const handleCapture = () => {
+        if (videoRef.current && canvasRef.current) {
+            const video = videoRef.current;
+            const canvas = canvasRef.current;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const context = canvas.getContext('2d');
+            if(context) {
+                context.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+                setCapturedImage(canvas.toDataURL('image/jpeg'));
+            }
+        }
+    };
+
+    const handleRetake = () => setCapturedImage(null);
+
+    const dataURLtoFile = (dataurl: string, filename: string): File => {
+        const arr = dataurl.split(',');
+        const mimeMatch = arr[0].match(/:(.*?);/);
+        if (!mimeMatch) throw new Error('Invalid data URL');
+        const mime = mimeMatch[1];
+        const bstr = atob(arr[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while(n--){
+            u8arr[n] = bstr.charCodeAt(n);
+        }
+        return new File([u8arr], filename, {type:mime});
+    }
+
+    const handleUsePhoto = () => {
+        if (capturedImage) {
+            const file = dataURLtoFile(capturedImage, `capture-${Date.now()}.jpg`);
+            handleImageUpload(file);
+            handleCloseCamera();
+        }
+    };
+
+    const resetState = () => {
+        setView('identification');
+        setSelectedImage(null);
+        setError(null);
+        setPlantIdResult('');
+        setMessages([]);
+        setChatSession(null);
+        setCameraViewActive(false);
+        setViewingPlant(null);
+        if (isRecording) {
+            recognitionRef.current?.stop();
+        }
+    };
+    
+    const renderOfflineBanner = () => {
+        if (isOnline) return null;
+        return (
+            <div className="bg-yellow-500 text-white text-center p-2 fixed top-0 left-0 right-0 z-50 text-sm">
+                {t('offlineMessage')}
+            </div>
+        );
+    };
+
+    const renderHeader = () => (
+        <header className="w-full p-4 flex justify-between items-center bg-white dark:bg-gray-800 shadow-md">
+            <button onClick={resetState} className="text-xl md:text-2xl font-bold text-green-600 dark:text-green-400 flex items-center">
+                <SparklesIcon className="w-8 h-8 mr-2" />
+                {t('plantIdentifier')}
+            </button>
+            <div className="flex items-center gap-4">
+                <button
+                    onClick={() => { setViewingPlant(null); setView('my_plants'); }}
+                    className="flex items-center gap-2 text-gray-600 dark:text-gray-300 hover:text-green-600 dark:hover:text-green-400"
+                    aria-label={t('myPlants')}
+                >
+                    <BookOpenIcon className="w-6 h-6" />
+                    <span className="hidden md:inline">{t('myPlants')}</span>
+                </button>
+                <select 
+                    value={language} 
+                    onChange={e => setLanguage(e.target.value as 'en' | 'fa')}
+                    className="bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-md p-2 text-sm"
+                >
+                    <option value="en">English</option>
+                    <option value="fa">فارسی</option>
+                </select>
+            </div>
+        </header>
+    );
+
+    const renderIdentificationView = () => (
+        <div className="w-full max-w-2xl mx-auto text-center p-4">
+            <h2 className="text-3xl font-semibold text-gray-700 dark:text-gray-200 mb-6">{t('identifyPlant')}</h2>
+            
+             {!isOnline ? (
+                <div className="mt-8 p-4 bg-yellow-100 dark:bg-yellow-800 border-l-4 border-yellow-500 text-yellow-800 dark:text-yellow-200" role="alert">
+                    <p className="font-bold">{t('offlineIdentificationDisabled')}</p>
+                </div>
+            ) : (
+                <div className="flex flex-col md:flex-row gap-4 justify-center">
+                    <button
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-8 cursor-pointer hover:border-green-500 dark:hover:border-green-400 transition"
+                    >
+                        <input type="file" accept="image/*" ref={fileInputRef} onChange={handleFileChange} className="hidden" />
+                        <UploadIcon className="w-12 h-12 text-gray-400 dark:text-gray-500 mb-4" />
+                        <span className="text-gray-500 dark:text-gray-400">{t('uploadFromGallery')}</span>
+                    </button>
+
+                    <button
+                        onClick={handleOpenCamera}
+                        className="flex-1 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-8 cursor-pointer hover:border-green-500 dark:hover:border-green-400 transition"
+                    >
+                        <CameraIcon className="w-12 h-12 text-gray-400 dark:text-gray-500 mb-4" />
+                        <span className="text-gray-500 dark:text-gray-400">{t('takePicture')}</span>
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+    
+    const renderChatView = () => (
+        <div className="flex flex-col h-[75vh] w-full max-w-3xl mx-auto bg-white dark:bg-gray-800 shadow-xl rounded-lg overflow-hidden">
+            <div className="p-4 border-b dark:border-gray-700">
+                <h2 className="text-xl font-semibold text-center">{t('chat')}</h2>
+            </div>
+            <div className="flex-1 p-4 overflow-y-auto">
+                {messages.map(msg => (
+                    <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'} mb-4`}>
+                        <div dir="auto" className={`rounded-lg px-4 py-2 max-w-sm ${msg.sender === 'user' ? 'bg-blue-500 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200'}`}>
+                            {msg.text}
+                        </div>
+                    </div>
+                ))}
+                {isBotTyping && (
+                    <div className="flex justify-start mb-4">
+                        <div dir="auto" className="rounded-lg px-4 py-2 max-w-sm bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                            <span className="animate-pulse">...</span>
+                        </div>
+                    </div>
+                )}
+            </div>
+            <div className="p-4 border-t dark:border-gray-700 flex items-center gap-2">
+                <input
+                    dir="auto"
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                    placeholder={!isOnline ? t('offlineChatDisabled') : t('typeMessage')}
+                    className="flex-1 p-2 border rounded-md dark:bg-gray-900 dark:border-gray-600 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-200 dark:disabled:bg-gray-800"
+                    disabled={isBotTyping || !isOnline}
+                />
+                 <button
+                    onClick={handleToggleRecording}
+                    className={`p-2 rounded-full transition-colors ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    aria-label={isRecording ? t('stopRecording') : t('startRecording')}
+                    disabled={!isOnline}
+                >
+                    <MicrophoneIcon className="w-6 h-6"/>
+                </button>
+                <button
+                    onClick={handleSendMessage}
+                    disabled={isBotTyping || !chatInput.trim() || !isOnline}
+                    className="bg-blue-500 text-white p-2 rounded-full hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center w-10 h-10 flex-shrink-0"
+                >
+                    <SendIcon className="w-6 h-6"/>
+                </button>
+            </div>
+        </div>
+    );
+
+    const renderCameraView = () => {
+        const tips = [t('cameraTip1'), t('cameraTip2'), t('cameraTip3'), t('cameraTip4')];
+        
+        return (
+            <div className="fixed inset-0 bg-black z-50 flex flex-col items-center justify-center">
+                <div className="relative w-full flex-1">
+                    {!capturedImage ? (
+                        <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover"></video>
+                    ) : (
+                        <img src={capturedImage} alt="Captured" className="w-full h-full object-contain" />
+                    )}
+                    <canvas ref={canvasRef} className="hidden"></canvas>
+                    
+                    {!capturedImage && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center p-8 pointer-events-none">
+                            <div className="w-full aspect-square max-w-md border-2 border-dashed border-white border-opacity-75 rounded-lg"></div>
+                            <p className="mt-4 text-white text-center text-shadow-lg transition-opacity duration-500">
+                                {tips[tipIndex]}
+                            </p>
+                        </div>
+                    )}
+                </div>
+                <div className="bg-black bg-opacity-50 p-4 flex justify-center items-center gap-8 w-full">
+                    {!capturedImage ? (
+                        <>
+                            <button onClick={handleCloseCamera} className="text-white font-semibold py-2 px-4">
+                                {t('back')}
+                            </button>
+                            <button onClick={handleCapture} className="w-20 h-20 bg-white rounded-full border-4 border-gray-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-white" aria-label={t('capture')}></button>
+                            <div className="w-24"></div> {/* Spacer */}
+                        </>
+                    ) : (
+                        <>
+                            <button onClick={handleRetake} className="bg-gray-200 text-black font-bold py-3 px-6 rounded-full">{t('retake')}</button>
+                            <button onClick={handleUsePhoto} className="bg-green-500 text-white font-bold py-3 px-6 rounded-full">{t('usePhoto')}</button>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+
+    const renderContent = () => {
+        if (cameraViewActive) {
+            return renderCameraView();
+        }
+
+        if (isLoading) {
+            return (
+                <div className="text-center p-8">
+                    <SparklesIcon className="w-16 h-16 mx-auto text-green-500 animate-spin mb-4" />
+                    <p className="text-xl text-gray-600 dark:text-gray-300">{t('identifying')}</p>
+                </div>
+            );
+        }
+        if (error) {
+            return (
+                <div className="text-center p-8 bg-red-100 dark:bg-red-900 border border-red-400 dark:border-red-700 text-red-700 dark:text-red-200 rounded-lg">
+                    <p>{error}</p>
+                    <button onClick={resetState} className="mt-4 bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">
+                        {t('startNewId')}
+                    </button>
+                </div>
+            );
+        }
+
+        switch (view) {
+            case 'identification':
+                return renderIdentificationView();
+            case 'result':
+                return viewingPlant ? (
+                    <PlantIdResult
+                        text={viewingPlant.details}
+                        image={viewingPlant.image}
+                        isOnline={isOnline}
+                        onStartChat={() => handleStartChat(viewingPlant.details)}
+                        isSavedView={true}
+                        plant={viewingPlant}
+                        onToggleTask={(taskTitle: string) => handleToggleCareTask(viewingPlant.id, taskTitle)}
+                        onBackToPlants={() => {
+                            setViewingPlant(null);
+                            setView('my_plants');
+                        }}
+                    />
+                ) : (
+                    <PlantIdResult
+                        text={plantIdResult}
+                        image={selectedImage}
+                        isOnline={isOnline}
+                        onStartChat={() => handleStartChat(plantIdResult)}
+                        onSavePlant={handleSavePlant}
+                        savedPlants={savedPlants}
+                    />
+                );
+            case 'chat':
+                return renderChatView();
+            case 'my_plants':
+                return <MyPlantsList 
+                    savedPlants={savedPlants} 
+                    onViewPlant={handleViewSavedPlant} 
+                    onDeletePlant={handleDeletePlant}
+                    onBack={resetState}
+                />;
+            default:
+                return renderIdentificationView();
+        }
+    };
+    
+    return (
+        <div dir={direction} className={`bg-gray-50 dark:bg-gray-900 min-h-screen text-gray-900 dark:text-gray-100 font-sans ${!isOnline ? 'pt-8' : ''}`}>
+            {renderOfflineBanner()}
+            {renderHeader()}
+            <main className="container mx-auto p-4 flex justify-center items-start">
+                 {renderContent()}
+            </main>
+            { (view === 'result' || view === 'chat') && !viewingPlant && (
+                <div className="text-center p-4">
+                    <button onClick={resetState} className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+                        {t('startNewId')}
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+};
+
+
+// --- Consolidated from index.tsx ---
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <LanguageProvider>
+      <App />
+    </LanguageProvider>
+  </React.StrictMode>
+);
+
+    </script>
 
     <script>
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/service-worker.js')
+          navigator.serviceWorker.register('./service-worker.js')
             .then(registration => {
               console.log('ServiceWorker registration successful with scope: ', registration.scope);
             })
